@@ -14,3 +14,7 @@ bytemuck = "1.10"
 bytemuck_derive = "1.1.0"
 pollster = "0.2"
 glam = "0.21"
+egui = { git = "https://github.com/emilk/egui" }
+egui-wgpu = { git = "https://github.com/emilk/egui" }
+egui-winit = { git = "https://github.com/emilk/egui" }
+chrono = "0.4.19"

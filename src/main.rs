@@ -1,4 +1,3 @@
-use std::f32::consts::PI;
 use std::{borrow::Cow, mem};
 
 use bytemuck_derive::{Pod, Zeroable};
@@ -17,6 +16,11 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+struct EguiContext {
+    render_pass: egui_wgpu::renderer::RenderPass,
+    ctx: egui::Context,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Vertex {
@@ -32,78 +36,25 @@ impl Vertex {
         }
     }
 
-    // uv
-    // +
-    // |  \
-    // |     \
-    // +------+
-    // |      |  \
-    // |      |    \
-    // +------+------+
-    pub fn new_big_triangle() -> (Vec<Self>, Vec<u16>) {
+    pub fn new_rect() -> (Vec<Self>, Vec<u16>) {
         let vertices = vec![
             Self::new([-1, 1], [0.0, 0.0]),
             Self::new([-1, -1], [0.0, 1.0]),
             Self::new([1, -1], [1.0, 1.0]),
             Self::new([1, 1], [1.0, 0.0]),
         ];
-        // use right hand normal here
         let indices = vec![0, 1, 2, 0, 2, 3];
-
         (vertices, indices)
     }
 }
 
-const COLOR_BG: [u8; 3] = [255, 0, 0];
-const COLOR1: [u8; 3] = [175, 211, 105];
-const COLOR2: [u8; 3] = [206, 234, 247];
-const COLOR3: [u8; 3] = [204, 215, 228];
-const COLOR4: [u8; 3] = [213, 201, 223];
-const COLOR5: [u8; 3] = [220, 184, 203];
-const COLOR6: [u8; 3] = [33, 33, 33];
-
-fn get_color(row: usize, col: usize, size: usize) -> [u8; 3] {
-    let one_tree: f32 = 1.0 / 3.0;
-    let two_tree: f32 = 2.0 / 3.0;
-    let xf = (col as f32) / (size as f32);
-    let yf = (row as f32) / (size as f32);
-    let delta = 0.05f32;
-    if xf <= 0.25 {
-        if yf >= (one_tree - delta) && yf <= (two_tree + delta) {
-            COLOR2
-        } else {
-            COLOR_BG
-        }
-    } else if xf <= 0.5 {
-        if yf <= one_tree {
-            COLOR1
-        } else if yf <= two_tree {
-            COLOR3
-        } else {
-            COLOR6
-        }
-    } else if xf <= 0.75 {
-        if yf >= (one_tree - delta) && yf <= (two_tree + delta) {
-            COLOR4
-        } else {
-            COLOR_BG
-        }
-    } else {
-        if yf >= (one_tree - delta) && yf <= (two_tree + delta) {
-            COLOR5
-        } else {
-            COLOR_BG
-        }
-    }
-}
+const COLOR_TEST: [u8; 3] = [100, 100, 0];
 
 // format rgb8
 fn create_texels(size: usize) -> Vec<u8> {
     let mut result = vec![0u8; size * size * 4];
     for i in 0..size * size {
-        let row = i / size;
-        let col = i % size;
-        let color = get_color(row, col, size);
+        let color = COLOR_TEST;
         result[i * 4] = color[0];
         result[i * 4 + 1] = color[1];
         result[i * 4 + 2] = color[2];
@@ -122,8 +73,9 @@ struct App {
     bind_group: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
     surface_config: SurfaceConfiguration,
+    surface_texture_format: TextureFormat,
     vertices: Vec<Vertex>,
-    theta: f32,
+    egui_context: EguiContext,
 }
 
 impl App {
@@ -162,7 +114,7 @@ impl App {
             height: size.height,
             present_mode: wgpu::PresentMode::Mailbox,
         };
-        let (vertices, indices) = Vertex::new_big_triangle();
+        let (vertices, indices) = Vertex::new_rect();
 
         let vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("vertex buffer"),
@@ -181,7 +133,6 @@ impl App {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            //border_color: Some(SamplerBorderColor::TransparentBlack),
             ..Default::default()
         });
 
@@ -303,6 +254,16 @@ impl App {
             multiview: None,
         });
 
+        let egui_render_apss =
+            egui_wgpu::renderer::RenderPass::new(&device, surface_texture_format, 1);
+
+        let ctx = egui::Context::default();
+
+        let egui_context = EguiContext {
+            render_pass: egui_render_apss,
+            ctx,
+        };
+
         Self {
             device,
             queue,
@@ -314,7 +275,8 @@ impl App {
             pipeline,
             surface_config,
             vertices,
-            theta: 0.0,
+            surface_texture_format,
+            egui_context,
         }
     }
 
@@ -376,11 +338,13 @@ impl App {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
         // rp
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor { label: None });
+
         {
             let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: None,
@@ -408,6 +372,39 @@ impl App {
             rpass.pop_debug_group();
             rpass.insert_debug_marker("Draw!");
             rpass.draw_indexed(0..self.index_count as u32, 0, 0..1);
+
+            let raw_input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_two_pos(
+                    Default::default(),
+                    egui::pos2(self.surface_config.width as f32, self.surface_config.height as f32),
+                )),
+                ..Default::default()
+            };
+            let full_output = self.egui_context.ctx.run(raw_input, |ctx| {
+                egui::CentralPanel::default().show(&ctx, |ui| {
+                    ui.label("text");
+                });
+            });
+
+            let clipped_primitives = self.egui_context.ctx.tessellate(full_output.shapes);
+            //println!("{:?}", &clipped_primitives);
+            let screen_descriptor = egui_wgpu::renderer::ScreenDescriptor {
+                size_in_pixels: [self.surface_config.width, self.surface_config.height],
+                pixels_per_point: 1.0,
+            };
+
+            self.egui_context.render_pass.update_buffers(
+                &self.device,
+                &self.queue,
+                &clipped_primitives,
+                &screen_descriptor,
+            );
+
+            self.egui_context.render_pass.execute_with_renderpass(
+                &mut rpass,
+                &clipped_primitives,
+                &screen_descriptor,
+            );
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -416,18 +413,23 @@ impl App {
     }
 
     pub fn update(&mut self) {
-        self.theta += 0.001;
-        if self.theta > 2.0 * PI {
-            self.theta -= 2.0 * PI;
-        }
     }
 }
 
 fn main() {
     env_logger::init();
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
+    let event_loop: EventLoop<()> = EventLoop::with_user_event();
+    let window = WindowBuilder::new()
+        .with_title("EMM")
+        .with_inner_size(winit::dpi::PhysicalSize {
+            width: 1024u32,
+            height: 768u32,
+        })
+        .build(&event_loop)
+        .unwrap();
+
     let mut app = pollster::block_on(App::new(&window));
+
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent { event, .. } => match event {
             WindowEvent::KeyboardInput {
