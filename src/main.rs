@@ -67,6 +67,7 @@ struct App {
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface: wgpu::Surface,
+    texture: wgpu::Texture,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: usize,
@@ -76,6 +77,7 @@ struct App {
     surface_texture_format: TextureFormat,
     vertices: Vec<Vertex>,
     egui_context: EguiContext,
+    texels: Vec<u8>,
 }
 
 impl App {
@@ -266,8 +268,10 @@ impl App {
 
         Self {
             device,
+            texels,
             queue,
             surface,
+            texture,
             bind_group,
             vertex_buffer,
             index_buffer,
@@ -326,6 +330,28 @@ impl App {
     }
 
     pub fn render(&mut self) {
+        let size = 4096;
+        let texture_extent = Extent3d {
+            width: self.surface_config.width,
+            height: self.surface_config.height,
+            depth_or_array_layers: 1,
+        };
+        // test write texture
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &self.texels,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(std::num::NonZeroU32::new((size * 4) as u32).unwrap()),
+                rows_per_image: None,
+            },
+            texture_extent,
+        );
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(_) => {
@@ -338,6 +364,37 @@ impl App {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_two_pos(
+                Default::default(),
+                egui::pos2(
+                    self.surface_config.width as f32,
+                    self.surface_config.height as f32,
+                ),
+            )),
+            ..Default::default()
+        };
+        let full_output = self.egui_context.ctx.run(raw_input, |ctx| {
+            egui::CentralPanel::default().show(&ctx, |ui| {
+                ui.label("text");
+            });
+        });
+
+        let clipped_primitives = self.egui_context.ctx.tessellate(full_output.shapes);
+        //println!("{:?}", &clipped_primitives);
+        //panic!("debug");
+        let screen_descriptor = egui_wgpu::renderer::ScreenDescriptor {
+            size_in_pixels: [self.surface_config.width, self.surface_config.height],
+            pixels_per_point: 1.0,
+        };
+
+        self.egui_context.render_pass.update_buffers(
+            &self.device,
+            &self.queue,
+            &clipped_primitives,
+            &screen_descriptor,
+        );
 
         // rp
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -372,34 +429,6 @@ impl App {
             rpass.pop_debug_group();
             rpass.insert_debug_marker("Draw!");
             rpass.draw_indexed(0..self.index_count as u32, 0, 0..1);
-
-            let raw_input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_two_pos(
-                    Default::default(),
-                    egui::pos2(self.surface_config.width as f32, self.surface_config.height as f32),
-                )),
-                ..Default::default()
-            };
-            let full_output = self.egui_context.ctx.run(raw_input, |ctx| {
-                egui::CentralPanel::default().show(&ctx, |ui| {
-                    ui.label("text");
-                });
-            });
-
-            let clipped_primitives = self.egui_context.ctx.tessellate(full_output.shapes);
-            //println!("{:?}", &clipped_primitives);
-            let screen_descriptor = egui_wgpu::renderer::ScreenDescriptor {
-                size_in_pixels: [self.surface_config.width, self.surface_config.height],
-                pixels_per_point: 1.0,
-            };
-
-            self.egui_context.render_pass.update_buffers(
-                &self.device,
-                &self.queue,
-                &clipped_primitives,
-                &screen_descriptor,
-            );
-
             self.egui_context.render_pass.execute_with_renderpass(
                 &mut rpass,
                 &clipped_primitives,
@@ -407,12 +436,26 @@ impl App {
             );
         }
 
+        //self.egui_context.render_pass.execute(
+        //    &mut encoder,
+        //    &view,
+        //    &clipped_primitives,
+        //    &screen_descriptor,
+        //    None,
+        //);
+
         self.queue.submit(Some(encoder.finish()));
 
         frame.present();
     }
 
     pub fn update(&mut self) {
+        let offset = 100 * 4;
+        for i in 0..100 {
+            for j in 0..4 {
+                self.texels[offset + i * 4 + j] += 1;
+            }
+        }
     }
 }
 
