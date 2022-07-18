@@ -2,6 +2,9 @@ use std::{borrow::Cow, mem};
 
 use bytemuck_derive::{Pod, Zeroable};
 
+use egui::FontDefinitions;
+use egui_wgpu_backend::{RenderPass, ScreenDescriptor};
+use egui_winit_platform::{Platform, PlatformDescriptor};
 use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
     BindGroupDescriptor, BindGroupLayoutEntry, BufferUsages, CommandEncoderDescriptor, Extent3d,
@@ -17,8 +20,8 @@ use winit::{
 };
 
 struct EguiContext {
-    render_pass: egui_wgpu::renderer::RenderPass,
-    ctx: egui::Context,
+    render_pass: RenderPass,
+    platform: Platform,
 }
 
 #[repr(C)]
@@ -114,7 +117,7 @@ impl App {
             format: surface_texture_format,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::Mailbox,
+            present_mode: wgpu::PresentMode::Fifo,
         };
         let (vertices, indices) = Vertex::new_rect();
 
@@ -194,8 +197,6 @@ impl App {
             texture_extent,
         );
 
-        //let aspect_ratio = (surface_config.width as f32) / (surface_config.height as f32);
-
         let bind_group = device.create_bind_group(&BindGroupDescriptor {
             layout: &bind_group_layout,
             entries: &[
@@ -256,14 +257,19 @@ impl App {
             multiview: None,
         });
 
-        let egui_render_apss =
-            egui_wgpu::renderer::RenderPass::new(&device, surface_texture_format, 1);
+        let platform = Platform::new(PlatformDescriptor {
+            physical_width: window.inner_size().width,
+            physical_height: window.inner_size().height,
+            scale_factor: window.scale_factor(),
+            font_definitions: FontDefinitions::default(),
+            style: Default::default(),
+        });
 
-        let ctx = egui::Context::default();
+        let egui_rpass = RenderPass::new(&device, surface_texture_format, 1);
 
         let egui_context = EguiContext {
-            render_pass: egui_render_apss,
-            ctx,
+            render_pass: egui_rpass,
+            platform,
         };
 
         Self {
@@ -329,7 +335,7 @@ impl App {
             .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
     }
 
-    pub fn render(&mut self) {
+    pub fn render(&mut self, window: &Window) {
         let size = 4096;
         let texture_extent = Extent3d {
             width: self.surface_config.width,
@@ -365,34 +371,36 @@ impl App {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let raw_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_two_pos(
-                Default::default(),
-                egui::pos2(
-                    self.surface_config.width as f32,
-                    self.surface_config.height as f32,
-                ),
-            )),
-            ..Default::default()
+        let screen_descriptor = ScreenDescriptor {
+            physical_width: self.surface_config.width,
+            physical_height: self.surface_config.height,
+            scale_factor: window.scale_factor() as f32,
         };
-        let full_output = self.egui_context.ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(&ctx, |ui| {
-                ui.label("text");
-            });
+
+        self.egui_context.platform.begin_frame();
+
+        // all ui logic here
+        egui::Window::new("fps").show(&self.egui_context.platform.context(), |ui| {
+            ui.label("fps: unknown");
         });
 
-        let clipped_primitives = self.egui_context.ctx.tessellate(full_output.shapes);
-        //println!("{:?}", &clipped_primitives);
-        //panic!("debug");
-        let screen_descriptor = egui_wgpu::renderer::ScreenDescriptor {
-            size_in_pixels: [self.surface_config.width, self.surface_config.height],
-            pixels_per_point: 1.0,
-        };
+        let full_output = self.egui_context.platform.end_frame(Some(window));
+        let paint_jobs = self
+            .egui_context
+            .platform
+            .context()
+            .tessellate(full_output.shapes);
+
+        let tdelta: egui::TexturesDelta = full_output.textures_delta;
+        self.egui_context
+            .render_pass
+            .add_textures(&self.device, &self.queue, &tdelta)
+            .expect("add texture ok");
 
         self.egui_context.render_pass.update_buffers(
             &self.device,
             &self.queue,
-            &clipped_primitives,
+            &paint_jobs,
             &screen_descriptor,
         );
 
@@ -429,20 +437,11 @@ impl App {
             rpass.pop_debug_group();
             rpass.insert_debug_marker("Draw!");
             rpass.draw_indexed(0..self.index_count as u32, 0, 0..1);
-            self.egui_context.render_pass.execute_with_renderpass(
-                &mut rpass,
-                &clipped_primitives,
-                &screen_descriptor,
-            );
+            self.egui_context
+                .render_pass
+                .execute_with_renderpass(&mut rpass, &paint_jobs, &screen_descriptor)
+                .unwrap();
         }
-
-        //self.egui_context.render_pass.execute(
-        //    &mut encoder,
-        //    &view,
-        //    &clipped_primitives,
-        //    &screen_descriptor,
-        //    None,
-        //);
 
         self.queue.submit(Some(encoder.finish()));
 
@@ -473,46 +472,49 @@ fn main() {
 
     let mut app = pollster::block_on(App::new(&window));
 
-    event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent { event, .. } => match event {
-            WindowEvent::KeyboardInput {
-                input:
-                    KeyboardInput {
-                        virtual_keycode: Some(VirtualKeyCode::Escape),
-                        state: ElementState::Pressed,
-                        ..
-                    },
-                ..
+    event_loop.run(move |event, _, control_flow| {
+        app.egui_context.platform.handle_event(&event);
+        match event {
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::KeyboardInput {
+                    input:
+                        KeyboardInput {
+                            virtual_keycode: Some(VirtualKeyCode::Escape),
+                            state: ElementState::Pressed,
+                            ..
+                        },
+                    ..
+                }
+                | WindowEvent::CloseRequested => {
+                    *control_flow = ControlFlow::Exit;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                WindowEvent::KeyboardInput {
+                    input:
+                        KeyboardInput {
+                            virtual_keycode: Some(VirtualKeyCode::R),
+                            state: ElementState::Pressed,
+                            ..
+                        },
+                    ..
+                } => {}
+                WindowEvent::Resized(size)
+                | WindowEvent::ScaleFactorChanged {
+                    new_inner_size: &mut size,
+                    ..
+                } => {
+                    app.resize(&size);
+                }
+                _ => (),
+            },
+            Event::RedrawEventsCleared => {
+                app.update();
+                window.request_redraw();
             }
-            | WindowEvent::CloseRequested => {
-                *control_flow = ControlFlow::Exit;
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            WindowEvent::KeyboardInput {
-                input:
-                    KeyboardInput {
-                        virtual_keycode: Some(VirtualKeyCode::R),
-                        state: ElementState::Pressed,
-                        ..
-                    },
-                ..
-            } => {}
-            WindowEvent::Resized(size)
-            | WindowEvent::ScaleFactorChanged {
-                new_inner_size: &mut size,
-                ..
-            } => {
-                app.resize(&size);
+            Event::RedrawRequested(_) => {
+                app.render(&window);
             }
             _ => (),
-        },
-        Event::RedrawEventsCleared => {
-            app.update();
-            window.request_redraw();
         }
-        Event::RedrawRequested(_) => {
-            app.render();
-        }
-        _ => (),
     });
 }
