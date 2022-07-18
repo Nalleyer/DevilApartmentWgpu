@@ -117,7 +117,7 @@ impl App {
             format: surface_texture_format,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
         };
         let (vertices, indices) = Vertex::new_rect();
 
