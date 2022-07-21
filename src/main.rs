@@ -8,7 +8,7 @@ use egui_winit_platform::{Platform, PlatformDescriptor};
 use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
     BindGroupDescriptor, BindGroupLayoutEntry, BufferUsages, CommandEncoderDescriptor, Extent3d,
-    ShaderModuleDescriptor, ShaderStages, SurfaceConfiguration, TextureDescriptor,
+    FilterMode, ShaderModuleDescriptor, ShaderStages, SurfaceConfiguration, TextureDescriptor,
     TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
 };
 use wgpu::{Color, RenderPassColorAttachment, RenderPassDescriptor};
@@ -18,6 +18,9 @@ use winit::{
     event_loop::{ControlFlow, EventLoop},
     window::{Window, WindowBuilder},
 };
+
+const DISPLAY_WIDTH: u32 = 426;
+const DISPLAY_HEIGHT: u32 = 240;
 
 struct EguiContext {
     render_pass: RenderPass,
@@ -54,16 +57,28 @@ impl Vertex {
 const COLOR_TEST: [u8; 3] = [100, 100, 0];
 
 // format rgb8
-fn create_texels(size: usize) -> Vec<u8> {
-    let mut result = vec![0u8; size * size * 4];
-    for i in 0..size * size {
+fn create_texels() -> Vec<u8> {
+    let wh = (DISPLAY_HEIGHT * DISPLAY_WIDTH) as usize;
+    let mut result = vec![0u8; wh * 4];
+    for i in 0..wh {
+        let x: u32 = (i as u32) % DISPLAY_WIDTH;
+        let percent = (x as f32) / (DISPLAY_WIDTH as f32);
         let color = COLOR_TEST;
-        result[i * 4] = color[0];
+        result[i * 4] = (256.0 * percent) as u8;
         result[i * 4 + 1] = color[1];
         result[i * 4 + 2] = color[2];
         result[i * 4 + 3] = 255;
     }
     result
+}
+
+fn get_length_in_pixel(screen_length: u32, display_length: u32) -> u32 {
+    debug_assert!(display_length <= screen_length);
+    let mut scale = 1;
+    while scale * display_length * 2 < screen_length {
+        scale *= 2;
+    }
+    display_length * scale
 }
 
 struct App {
@@ -138,6 +153,8 @@ impl App {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: FilterMode::Nearest,
+            min_filter: FilterMode::Nearest,
             ..Default::default()
         });
 
@@ -169,11 +186,10 @@ impl App {
             push_constant_ranges: &[],
         });
 
-        let size = 4096;
-        let texels = create_texels(size);
+        let texels = create_texels();
         let texture_extent = Extent3d {
-            width: size as u32,
-            height: size as u32,
+            width: DISPLAY_WIDTH,
+            height: DISPLAY_HEIGHT,
             depth_or_array_layers: 1,
         };
         let texture = device.create_texture(&TextureDescriptor {
@@ -191,7 +207,7 @@ impl App {
             &texels,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(std::num::NonZeroU32::new((size * 4) as u32).unwrap()),
+                bytes_per_row: Some(std::num::NonZeroU32::new(DISPLAY_WIDTH * 4u32).unwrap()),
                 rows_per_image: None,
             },
             texture_extent,
@@ -296,7 +312,6 @@ impl App {
     }
 
     pub fn resize(&mut self, size: &PhysicalSize<u32>) {
-        println!("size: {:?}", size);
         if size.width == 0 || size.height == 0 {
             return;
         }
@@ -305,44 +320,41 @@ impl App {
 
         let (w, h) = (self.surface_config.width, self.surface_config.height);
 
-        if w >= h {
-            let height_to_width = (h as f32) / (w as f32);
-            // change x
-            self.vertices[0].pos[0] = -1.0 * height_to_width;
-            self.vertices[1].pos[0] = -1.0 * height_to_width;
-            self.vertices[2].pos[0] = 1.0 * height_to_width;
-            self.vertices[3].pos[0] = 1.0 * height_to_width;
-            // normal y
-            self.vertices[0].pos[1] = 1.0;
-            self.vertices[1].pos[1] = -1.0;
-            self.vertices[2].pos[1] = -1.0;
-            self.vertices[3].pos[1] = 1.0;
+        let (height_percent, width_percent) = if w >= h {
+            let height = get_length_in_pixel(h, DISPLAY_HEIGHT);
+            let width = height / DISPLAY_HEIGHT * DISPLAY_WIDTH;
+            let height_percent = (height as f32) / (h as f32);
+            let width_percent = (width as f32) / (w as f32);
+            (height_percent, width_percent)
         } else {
-            let width_to_height = (w as f32) / (h as f32);
-            // change y
-            self.vertices[0].pos[1] = 1.0 * width_to_height;
-            self.vertices[1].pos[1] = -1.0 * width_to_height;
-            self.vertices[2].pos[1] = -1.0 * width_to_height;
-            self.vertices[3].pos[1] = 1.0 * width_to_height;
-            // normal x
-            self.vertices[0].pos[0] = -1.0;
-            self.vertices[1].pos[0] = -1.0;
-            self.vertices[2].pos[0] = 1.0;
-            self.vertices[3].pos[0] = 1.0;
-        }
+            let width = get_length_in_pixel(w, DISPLAY_WIDTH);
+            let height = width / DISPLAY_WIDTH * DISPLAY_HEIGHT;
+            let height_percent = (height as f32) / (h as f32);
+            let width_percent = (width as f32) / (w as f32);
+            (height_percent, width_percent)
+        };
+
+        self.vertices[0].pos[0] = -1.0 * width_percent;
+        self.vertices[1].pos[0] = -1.0 * width_percent;
+        self.vertices[2].pos[0] = 1.0 * width_percent;
+        self.vertices[3].pos[0] = 1.0 * width_percent;
+        self.vertices[0].pos[1] = 1.0 * height_percent;
+        self.vertices[1].pos[1] = -1.0 * height_percent;
+        self.vertices[2].pos[1] = -1.0 * height_percent;
+        self.vertices[3].pos[1] = 1.0 * height_percent;
 
         self.queue
             .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
     }
 
     pub fn render(&mut self, window: &Window) {
-        let size = 4096;
         let texture_extent = Extent3d {
-            width: self.surface_config.width,
-            height: self.surface_config.height,
+            width: DISPLAY_WIDTH,
+            height: DISPLAY_HEIGHT,
             depth_or_array_layers: 1,
         };
         // test write texture
+
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.texture,
@@ -353,11 +365,12 @@ impl App {
             &self.texels,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(std::num::NonZeroU32::new((size * 4) as u32).unwrap()),
+                bytes_per_row: Some(std::num::NonZeroU32::new(DISPLAY_WIDTH * 4u32).unwrap()),
                 rows_per_image: None,
             },
             texture_extent,
         );
+
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(_) => {
@@ -464,8 +477,12 @@ fn main() {
     let window = WindowBuilder::new()
         .with_title("EMM")
         .with_inner_size(winit::dpi::PhysicalSize {
-            width: 1024u32,
-            height: 768u32,
+            width: DISPLAY_WIDTH * 4,
+            height: DISPLAY_HEIGHT * 4,
+        })
+        .with_min_inner_size(winit::dpi::PhysicalSize {
+            width: DISPLAY_WIDTH,
+            height: DISPLAY_HEIGHT,
         })
         .build(&event_loop)
         .unwrap();
@@ -508,7 +525,7 @@ fn main() {
                 _ => (),
             },
             Event::RedrawEventsCleared => {
-                app.update();
+                //app.update();
                 window.request_redraw();
             }
             Event::RedrawRequested(_) => {
